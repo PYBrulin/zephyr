@@ -740,8 +740,92 @@ void pl011_isr(const struct device *dev)
 		}
 	}
 }
+
+#if defined(CONFIG_SOC_BCM2711)
+/*
+ * BCM2711 (Raspberry Pi 4/CM4): uart0, uart2, uart3, uart4, and uart5 are all wired to the same
+ * physical GIC SPI 121 line (see dts/arm64/broadcom/bcm2711.dtsi) -- confirmed against both
+ * mainline Linux's and the Raspberry Pi Foundation's own kernel fork's devicetree, which list the
+ * identical IRQ number for these UARTs. Linux's amba-pl011.c handles this natively via
+ * request_irq(..., IRQF_SHARED, ...): every instance registers on the same IRQ number, and each
+ * instance's handler self-selects by checking its own MIS register (which pl011_isr() above
+ * already does, via pl011_irq_rx_ready()/pl011_irq_tx_ready() called from the registered irq_cb).
+ *
+ * Zephyr's IRQ_CONNECT() has no such sharing -- it is a static, compile-time table entry, and
+ * connecting the same IRQ number from two instances is a build-time error (gen_isr_tables.py:
+ * "multiple registrations"). arm_gic_get_active() (used by _isr_wrapper.S to pick which ISR to
+ * invoke) also can't be called a second time from inside the ISR to ask "which IRQ is this" --
+ * GICC_IAR is read-once/acknowledging, and _isr_wrapper.S already consumed it before calling us.
+ *
+ * So this hand-written demux doesn't try to determine which UART fired at all: it simply calls
+ * pl011_isr() for every one of uart0/uart2/uart3/uart4/uart5 that is devicetree-enabled --
+ * harmless for the ones that aren't the actual source, since pl011_isr() (via irq_cb ->
+ * pl011_irq_rx_ready()/pl011_irq_tx_ready()) already no-ops when that specific device's own
+ * status register shows nothing pending. Only one of these nodes' pl011_irq_config_func_##n
+ * (whichever is enabled with the lowest instance number, see PL011_BCM2711_SHARED_IRQ_PRIMARY
+ * below) actually calls IRQ_CONNECT for GIC SPI 121; the others skip it entirely.
+ *
+ * Scoped to this one SoC/IRQ number rather than a generic N-way shared-IRQ mechanism inside the
+ * pl011 driver: a fully generic compile-time "which instance is canonical for a given shared IRQ
+ * number" resolution would need to work across arbitrary devicetree instance counts/orderings for
+ * every board using this driver, which is both harder to get right and a much larger blast radius
+ * than this SoC's known, fixed set of 5 possible shared-line UARTs.
+ */
+static void pl011_bcm2711_shared_irq_isr(const void *arg)
+{
+	ARG_UNUSED(arg);
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart0))
+	pl011_isr(DEVICE_DT_GET(DT_NODELABEL(uart0)));
+#endif
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart2))
+	pl011_isr(DEVICE_DT_GET(DT_NODELABEL(uart2)));
+#endif
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart3))
+	pl011_isr(DEVICE_DT_GET(DT_NODELABEL(uart3)));
+#endif
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart4))
+	pl011_isr(DEVICE_DT_GET(DT_NODELABEL(uart4)));
+#endif
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart5))
+	pl011_isr(DEVICE_DT_GET(DT_NODELABEL(uart5)));
+#endif
+}
+
+/* Whichever of uart0/uart2/uart3/uart4/uart5 is enabled with the lowest instance number is the
+ * one that calls IRQ_CONNECT on GIC SPI 121; the rest skip it (see PL011_IRQ_CONFIG_FUNC_BODY).
+ * Must expand to a bare 0/1 token (not parenthesized) -- IF_ENABLED()/COND_CODE_1() require that
+ * to detect the "enabled" case; DT_SAME_NODE (== IS_EQ(DT_DEP_ORD(...), DT_DEP_ORD(...))) already
+ * expands that way. */
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart0))
+#define PL011_BCM2711_SHARED_IRQ_PRIMARY(n) DT_SAME_NODE(n, DT_NODELABEL(uart0))
+#elif DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart2))
+#define PL011_BCM2711_SHARED_IRQ_PRIMARY(n) DT_SAME_NODE(n, DT_NODELABEL(uart2))
+#elif DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart3))
+#define PL011_BCM2711_SHARED_IRQ_PRIMARY(n) DT_SAME_NODE(n, DT_NODELABEL(uart3))
+#elif DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart4))
+#define PL011_BCM2711_SHARED_IRQ_PRIMARY(n) DT_SAME_NODE(n, DT_NODELABEL(uart4))
+#elif DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart5))
+#define PL011_BCM2711_SHARED_IRQ_PRIMARY(n) DT_SAME_NODE(n, DT_NODELABEL(uart5))
+#else
+#define PL011_BCM2711_SHARED_IRQ_PRIMARY(n) 0
+#endif
+#endif /* CONFIG_SOC_BCM2711 */
 #endif /* PL011_USE_IRQ */
 
+#if defined(CONFIG_SOC_BCM2711)
+#define PL011_IRQ_CONFIG_FUNC_BODY(n, prop, i)					\
+	{									\
+		IF_ENABLED(PL011_BCM2711_SHARED_IRQ_PRIMARY(n), (		\
+			IRQ_CONNECT(DT_IRQ_BY_IDX(n, i, irq),			\
+				DT_IRQ_BY_IDX(n, i, priority),			\
+				pl011_bcm2711_shared_irq_isr,			\
+				NULL,						\
+				0);						\
+			irq_enable(DT_IRQ_BY_IDX(n, i, irq));			\
+		))								\
+	}
+#else
 #define PL011_IRQ_CONFIG_FUNC_BODY(n, prop, i)		\
 	{						\
 		IRQ_CONNECT(DT_IRQ_BY_IDX(n, i, irq),	\
@@ -751,6 +835,7 @@ void pl011_isr(const struct device *dev)
 			0);				\
 		irq_enable(DT_IRQ_BY_IDX(n, i, irq));	\
 	}
+#endif /* CONFIG_SOC_BCM2711 */
 
 #define PL011_NODE_USE_IRQ(n)                                                                      \
 	COND_CODE_1(CONFIG_UART_INTERRUPT_DRIVEN, (DT_INST_NODE_HAS_PROP(n, interrupts)), (0))

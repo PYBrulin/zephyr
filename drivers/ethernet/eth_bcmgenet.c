@@ -269,11 +269,22 @@ done:
 static void bcmgenet_rx_thread(void *arg1, void *arg2 __unused, void *arg3 __unused)
 {
 	const struct device *dev = (struct device *)arg1;
+	int ret;
 
 	while (true) {
-		while (bcmgenet_rx(dev) == 0) {
-		/* drain all pending descriptors before sleeping */
-		}
+		/*
+		 * -ENOMEM means bcmgenet_rx() still advanced cidx/rx_idx past a
+		 * descriptor it couldn't allocate a pkt for -- the descriptor is
+		 * consumed either way. Treat it like success and keep draining,
+		 * since more already-arrived descriptors may be queued behind it;
+		 * stopping here would let the ring fall behind and wrap over
+		 * frames the driver never read. Only -EAGAIN (ring caught up) or
+		 * -ENETDOWN (interface down) should stop the drain.
+		 */
+		do {
+			ret = bcmgenet_rx(dev);
+		} while (ret == 0 || ret == -ENOMEM);
+
 		k_usleep(CONFIG_ETH_BCMGENET_RX_POLLING_INTERVAL_US);
 	}
 }

@@ -248,6 +248,7 @@ enum sd_support_flag {
 	SD_CMD23_FLAG = BIT(7),
 	SD_SPEED_CLASS_CONTROL_FLAG = BIT(8),
 	SD_MEM_PRESENT_FLAG = BIT(9),
+	MMC_CACHE_ON_FLAG = BIT(10),
 };
 
 

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <zephyr/drivers/disk.h>
 #include <zephyr/drivers/sdhc.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -53,6 +54,9 @@
 #define MMC_SWITCH_CACHE_ON_ARG                                                                    \
 	(0xFC000000 & (0U << 26)) + (0x03000000 & (0b11 << 24)) + (0x00FF0000 & (33U << 16)) +     \
 		(0x0000FF00 & (1U << 8)) + (0x000000F7 & (0U << 3)) + (0x00000000 & (3U << 0))
+#define MMC_SWITCH_FLUSH_CACHE_ARG                                                                 \
+	(0xFC000000 & (0U << 26)) + (0x03000000 & (0b11 << 24)) + (0x00FF0000 & (32U << 16)) +     \
+		(0x0000FF00 & (1U << 8)) + (0x000000F7 & (0U << 3)) + (0x00000000 & (3U << 0))
 
 LOG_MODULE_DECLARE(sd, CONFIG_SD_LOG_LEVEL);
 
@@ -68,8 +72,50 @@ inline int mmc_read_blocks(struct sd_card *card, uint8_t *rbuf, uint32_t start_b
 	return card_read_blocks(card, rbuf, start_block, num_blocks);
 }
 
-inline int mmc_ioctl(struct sd_card *card, uint8_t cmd, void *buf)
+/* Write back the eMMC volatile cache enabled by mmc_set_cache() */
+static int mmc_flush_cache(struct sd_card *card)
 {
+	struct sdhc_command cmd = {0};
+	int ret;
+
+	ret = k_mutex_lock(&card->lock, K_MSEC(CONFIG_SD_DATA_TIMEOUT));
+	if (ret) {
+		LOG_WRN("Could not get MMC card mutex");
+		return ret;
+	}
+
+	/* CMD6 is only accepted in transfer state: wait for any write to finish */
+	ret = sdmmc_wait_ready(card);
+	if (ret) {
+		goto out;
+	}
+
+	cmd.opcode = SD_SWITCH;
+	cmd.arg = MMC_SWITCH_FLUSH_CACHE_ARG;
+	cmd.response_type = SD_RSP_TYPE_R1b;
+	cmd.timeout_ms = CONFIG_SD_CMD_TIMEOUT;
+	ret = sdhc_request(card->sdhc, &cmd, NULL);
+	if (ret) {
+		LOG_ERR("Error flushing card cache: %d", ret);
+		goto out;
+	}
+	ret = sdmmc_wait_ready(card);
+out:
+	k_mutex_unlock(&card->lock);
+	return ret;
+}
+
+int mmc_ioctl(struct sd_card *card, uint8_t cmd, void *buf)
+{
+	if ((cmd == DISK_IOCTL_CTRL_SYNC || cmd == DISK_IOCTL_CTRL_DEINIT) &&
+	    (card->flags & MMC_CACHE_ON_FLAG)) {
+		int ret = mmc_flush_cache(card);
+
+		if (ret) {
+			return ret;
+		}
+	}
+
 	return card_ioctl(card, cmd, buf);
 }
 
@@ -711,5 +757,8 @@ static int mmc_set_cache(struct sd_card *card, struct mmc_ext_csd *card_ext_csd)
 		return ret;
 	}
 	ret = sdmmc_wait_ready(card);
+	if (ret == 0) {
+		card->flags |= MMC_CACHE_ON_FLAG;
+	}
 	return ret;
 }

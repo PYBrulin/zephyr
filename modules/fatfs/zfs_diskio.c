@@ -16,12 +16,17 @@
 #include <zfs_diskio.h> /* Zephyr specific FatFS API */
 #include <zephyr/storage/disk_access.h>
 
-#if CONFIG_FS_FATFS_CUSTOM_MOUNT_POINT_COUNT
+#if CONFIG_FS_FATFS_CUSTOM_MOUNT_POINT_COUNT && !defined(CONFIG_FS_FATFS_MULTI_PARTITION)
 #define PDRV_STR_ARRAY VolumeStr
 #else
-static const char *const pdrv_str[] = {FF_VOLUME_STRS};
+/*
+ * With multiple partitions, volume names (custom mount points) are not disk
+ * names: physical drives are the devicetree disks, in devicetree order, as
+ * referenced by the pd field of VolToPart[].
+ */
+static const char *const pdrv_str[] = {ZFS_DT_DISK_NAMES};
 #define PDRV_STR_ARRAY pdrv_str
-#endif /* CONFIG_FS_FATFS_CUSTOM_MOUNT_POINT_COUNT */
+#endif
 
 /* Get Drive Status */
 DSTATUS disk_status(BYTE pdrv)

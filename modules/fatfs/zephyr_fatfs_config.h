@@ -110,7 +110,9 @@
 
 /* clang-format off */
 #undef FF_VOLUME_STRS
-#define FF_VOLUME_STRS                                                                             \
+#define FF_VOLUME_STRS ZFS_DT_DISK_NAMES
+/* Devicetree disk names, also used as physical drive names (zfs_diskio.c) */
+#define ZFS_DT_DISK_NAMES                                                                          \
 	DT_FOREACH_STATUS_OKAY(zephyr_flash_disk, _FF_DISK_NAME)                                   \
 	DT_FOREACH_STATUS_OKAY(zephyr_ram_disk, _FF_DISK_NAME)                                     \
 	DT_FOREACH_STATUS_OKAY(zephyr_memc_ram_disk, _FF_DISK_NAME)                                \
